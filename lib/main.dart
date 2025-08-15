@@ -1,23 +1,33 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dashboard_screen.dart';
 
-// A simple data class to represent a single habit.
 class Habit {
   String name;
-  bool isCompleted;
+  Map<String, bool> completionLog;
 
-  Habit({required this.name, this.isCompleted = false});
+  Habit({required this.name, Map<String, bool>? completionLog})
+      : completionLog = completionLog ?? {};
 
-  // Helper methods to convert Habit object to/from a Map, which is needed for JSON encoding.
+  bool isCompletedToday() {
+    final today = DateTime.now().toIso8601String().substring(0, 10);
+    return completionLog[today] ?? false;
+  }
+
+  void toggleToday() {
+    final today = DateTime.now().toIso8601String().substring(0, 10);
+    completionLog[today] = !(completionLog[today] ?? false);
+  }
+
   Map<String, dynamic> toJson() => {
     'name': name,
-    'isCompleted': isCompleted,
+    'completionLog': completionLog,
   };
 
   factory Habit.fromJson(Map<String, dynamic> json) => Habit(
     name: json['name'],
-    isCompleted: json['isCompleted'],
+    completionLog: Map<String, bool>.from(json['completionLog'] ?? {}),
   );
 }
 
@@ -33,6 +43,7 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'DailyTick',
       theme: ThemeData(
+        fontFamily: 'Poppins',
         primarySwatch: Colors.teal,
         brightness: Brightness.dark,
         scaffoldBackgroundColor: const Color(0xFF121212),
@@ -58,8 +69,9 @@ class HabitTrackerScreen extends StatefulWidget {
 }
 
 class _HabitTrackerScreenState extends State<HabitTrackerScreen> {
-  List<Habit> _habits = [];
+  final GlobalKey<AnimatedListState> _listKey = GlobalKey<AnimatedListState>();
   final TextEditingController _habitController = TextEditingController();
+  List<Habit> _habits = [];
 
   @override
   void initState() {
@@ -67,31 +79,18 @@ class _HabitTrackerScreenState extends State<HabitTrackerScreen> {
     _loadHabits();
   }
 
-  // Load habits from the device's local storage.
   Future<void> _loadHabits() async {
     final prefs = await SharedPreferences.getInstance();
     final String? habitsString = prefs.getString('habits');
-    final String? lastOpenedDate = prefs.getString('lastOpenedDate');
-    final String today = DateTime.now().toIso8601String().substring(0, 10);
 
     if (habitsString != null) {
       final List<dynamic> habitsJson = jsonDecode(habitsString);
-      setState(() {
-        _habits = habitsJson.map((json) => Habit.fromJson(json)).toList();
-        // If the app was last opened on a different day, reset all habits.
-        if (lastOpenedDate != today) {
-          for (var habit in _habits) {
-            habit.isCompleted = false;
-          }
-        }
-      });
+      _habits = habitsJson.map((json) => Habit.fromJson(json)).toList();
     }
-    // Save the current date as the last opened date.
-    await prefs.setString('lastOpenedDate', today);
-    _saveHabits(); // Save the potentially reset habits
+
+    setState(() {});
   }
 
-  // Save the current list of habits to local storage.
   Future<void> _saveHabits() async {
     final prefs = await SharedPreferences.getInstance();
     final String habitsString =
@@ -99,23 +98,41 @@ class _HabitTrackerScreenState extends State<HabitTrackerScreen> {
     await prefs.setString('habits', habitsString);
   }
 
-  // Toggles the completion status of a habit.
-  void _toggleHabit(int index) {
+  void _addHabit(String name) {
+    final newHabit = Habit(name: name);
     setState(() {
-      _habits[index].isCompleted = !_habits[index].isCompleted;
+      _habits.insert(0, newHabit);
+      _listKey.currentState?.insertItem(0);
     });
     _saveHabits();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Habit added!')),
+    );
   }
 
-  // Deletes a habit from the list.
   void _deleteHabit(int index) {
+    final removedHabit = _habits[index];
     setState(() {
       _habits.removeAt(index);
+      _listKey.currentState?.removeItem(
+        index,
+            (context, animation) =>
+            _buildHabitTile(removedHabit, index, animation),
+      );
+    });
+    _saveHabits();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Habit removed')),
+    );
+  }
+
+  void _toggleHabit(int index) {
+    setState(() {
+      _habits[index].toggleToday();
     });
     _saveHabits();
   }
 
-  // Shows a dialog to add a new habit.
   void _showAddHabitDialog() {
     showDialog(
       context: context,
@@ -135,11 +152,8 @@ class _HabitTrackerScreenState extends State<HabitTrackerScreen> {
             ElevatedButton(
               onPressed: () {
                 if (_habitController.text.isNotEmpty) {
-                  setState(() {
-                    _habits.add(Habit(name: _habitController.text));
-                  });
+                  _addHabit(_habitController.text);
                   _habitController.clear();
-                  _saveHabits();
                   Navigator.pop(context);
                 }
               },
@@ -151,46 +165,99 @@ class _HabitTrackerScreenState extends State<HabitTrackerScreen> {
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('DailyTick 🌱'),
-      ),
-      body: _habits.isEmpty
-          ? const Center(
-        child: Text(
-          'No habits yet.\nTap "+" to add one!',
-          textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 18, color: Colors.grey),
-        ),
-      )
-          : ListView.builder(
-        itemCount: _habits.length,
-        itemBuilder: (context, index) {
-          final habit = _habits[index];
-          return ListTile(
+  List<Map<String, dynamic>> _generateWeeklyStats() {
+    final now = DateTime.now();
+    return List.generate(7, (i) {
+      final date = now.subtract(Duration(days: i));
+      final dateKey = date.toIso8601String().substring(0, 10);
+      final dayName = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][date.weekday % 7];
+      final completed = _habits.where((h) => h.completionLog[dateKey] == true).length;
+      return {
+        'day': dayName,
+        'completed': completed,
+      };
+    }).reversed.toList();
+  }
+
+  Widget _buildHabitTile(Habit habit, int index, Animation<double> animation) {
+    return SizeTransition(
+      sizeFactor: animation,
+      child: Card(
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        elevation: 2,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        child: InkWell(
+          onTap: () => _toggleHabit(index),
+          borderRadius: BorderRadius.circular(8),
+          child: ListTile(
             title: Text(
               habit.name,
               style: TextStyle(
-                decoration: habit.isCompleted
+                decoration: habit.isCompletedToday()
                     ? TextDecoration.lineThrough
                     : TextDecoration.none,
-                color: habit.isCompleted ? Colors.grey : Colors.white,
+                color: habit.isCompletedToday() ? Colors.grey : Colors.white,
               ),
             ),
             leading: Checkbox(
-              value: habit.isCompleted,
-              onChanged: (bool? value) {
-                _toggleHabit(index);
-              },
+              value: habit.isCompletedToday(),
+              onChanged: (_) => _toggleHabit(index),
               activeColor: Colors.teal,
             ),
             trailing: IconButton(
               icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
               onPressed: () => _deleteHabit(index),
             ),
-          );
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('DailyTick 🌱'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.bar_chart),
+            onPressed: () {
+              final stats = _generateWeeklyStats();
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => DashboardScreen(
+                    weeklyStats: stats,
+                    habits: _habits,
+                  ),
+                ),
+              );
+            },
+          ),
+
+        ],
+      ),
+      body: _habits.isEmpty
+          ? Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: const [
+            Icon(Icons.hourglass_empty, size: 64, color: Colors.tealAccent),
+            SizedBox(height: 20),
+            Text(
+              'No habits yet.\nTap "+" to add one!',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 20, fontFamily: 'Poppins', color: Colors.grey),
+            ),
+          ],
+        ),
+      )
+          : AnimatedList(
+        key: _listKey,
+        initialItemCount: _habits.length,
+        itemBuilder: (context, index, animation) {
+          return _buildHabitTile(_habits[index], index, animation);
         },
       ),
       floatingActionButton: FloatingActionButton(
